@@ -450,7 +450,7 @@ Manter este terminal aberto junto com o consumer (Passo 5).
 Abre o dashboard principal com auto-refresh, rankings atualizados ao vivo e feed dos últimos eventos:
 
 ```bash
-streamlit run realtime_queries/data-view-realtime.py
+python -m streamlit run realtime_queries/data-view-realtime.py
 ```
 
 O Streamlit abrirá automaticamente no navegador (geralmente `http://localhost:8501`) e solicitará permissão. Os logs e rankings serão atualizados em tempo quase real conforme o gerador envia eventos.
