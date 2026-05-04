@@ -389,7 +389,7 @@ pip install -r requirements.txt
 
 ---
 
-### Passo 3 — Resetar e popular o MongoDB com dados fake
+### Passo 3 — Resetar e popular o MongoDB com dados e eventos
 
 Limpa o banco e popula com 30 postos e 5.000 eventos:
 
