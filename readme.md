@@ -5,7 +5,7 @@
 
 ---
 
-## 🧑‍💻 Integrantes
+##  Integrantes
 
 | Nome | RM |
 |------|----|
@@ -17,7 +17,7 @@
 | Roberto Ferreira Paulo    | RM 362593 |
 
 ---
-## 🎯 Visão geral
+##  Visão geral
 
 O **Radar Combustível** é uma plataforma orientada a dados que monitora, em tempo quase real, o comportamento de preços, demanda e interação de usuários em postos de combustível na Grande São Paulo.
 
@@ -31,7 +31,7 @@ A solução foi projetada para responder perguntas críticas de negócio com bai
 
 ---
 
-## 🧠 Proposta da solução
+## Proposta da solução
 
 A arquitetura implementa um pipeline moderno orientado a eventos:
 
@@ -51,7 +51,6 @@ mongo_seed + realtime_generator
 
 O sistema permite tanto análise histórica quanto monitoramento contínuo, simulando um ambiente próximo de produção.
 
----
 ---
 
 ## 🏗️ Arquitetura da solução
@@ -94,7 +93,165 @@ O sistema permite tanto análise histórica quanto monitoramento contínuo, simu
 │                             └─────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
 ```
-## 🏗️ Arquitetura técnica
+---
+
+## 🗄️ Modelo de dados — MongoDB
+
+### Collection `postos`
+
+Cadastro principal dos postos, desnormalizado para leitura direta:
+
+```json
+{
+  "posto_id": "posto_001",
+  "nome": "Posto Ipiranga Oliveira",
+  "bandeira": "Ipiranga",
+  "bairro": "Pinheiros",
+  "cidade": "São Paulo",
+  "lat": -23.563412,
+  "lon": -46.682901,
+  "aberto_24h": true,
+  "combustiveis": ["gasolina_comum", "gasolina_aditivada", "etanol"],
+  "precos": {
+    "gasolina_comum": 5.79,
+    "gasolina_aditivada": 6.09,
+    "etanol": 3.89
+  },
+  "stars": 4.2,
+  "total_avaliacoes": 312
+}
+```
+
+### Collection `eventos`
+
+Documento único desnormalizado — todos os tipos de evento compartilham a mesma collection. Campos presentes variam por tipo:
+
+| Campo | `view` | `search` | `price_update` | `rating` | `abastecimento` |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `posto_id`, `posto_nome`, `bairro`, `lat`, `lon` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `combustivel`, `preco` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `origem`, `sessao_id`, `duracao_seg` | ✓ | | | | |
+| `termo`, `raio_km`, `resultados`, `clicou` | | ✓ | | | |
+| `preco_anterior`, `delta_pct`, `delta_abs`, `fonte` | | | ✓ | | |
+| `stars`, `comentario` | | | | ✓ | |
+| `litros`, `valor_total`, `forma_pagamento` | | | | | ✓ |
+
+Essa modelagem orientada a acesso evita joins e permite que o Change Stream entregue eventos já completos para o pipeline.
+
+### Índices criados
+
+```python
+# postos
+{ "posto_id": 1 }          # unique
+{ "bairro": 1 }
+{ "combustiveis": 1 }
+{ "lat": 1, "lon": 1 }
+
+# eventos
+{ "posto_id": 1, "ts": -1 }
+{ "type": 1, "ts": -1 }
+{ "bairro": 1, "type": 1 }
+{ "combustivel": 1, "type": 1 }
+{ "ts": -1 }
+```
+
+---
+
+## ⚡ Estruturas Redis e justificativas
+
+### `Hash posto:{id}` — cadastro resumido
+
+**Por que Hash?** O posto é uma entidade com múltiplos atributos de tipos distintos (string, float, int). O Hash permite `HGET` e `HSET` de campos individuais sem deserializar o objeto inteiro, e o `HMGET` retorna múltiplos campos em O(N) onde N é o número de campos — ideal para compor a tela de detalhe de um posto.
+
+```
+posto:001 → {
+    posto_nome: "Posto Ipiranga Oliveira",
+    bairro: "Pinheiros",
+    lat: -23.563412,
+    lon: -46.682901,
+    stars: 4.2,
+    views: 87,
+    preco_gasolina_comum: 5.79,
+    ts_preco_gasolina_comum: 1710010203000,
+    ...
+}
+```
+
+---
+
+### `Sorted Set ranking:postos:preco:{combustivel}` — ranking de preços
+
+**Por que Sorted Set?** O score é o preço atual em R$/L. `ZRANGE … WITHSCORES` retorna os postos ordenados do mais barato ao mais caro em O(log N + M). Atualização via `ZADD` com flag `GT` garante que o score só muda quando o preço novo é diferente — sem gravação desnecessária.
+
+```
+ranking:postos:preco:gasolina_comum →
+    posto_015  5.49
+    posto_003  5.59
+    posto_022  5.67
+    ...
+```
+
+---
+
+### `Sorted Set ranking:bairros:buscas` — demanda por região
+
+**Por que Sorted Set?** Cada evento `search` incrementa o score do bairro em 1 via `ZINCRBY`. `ZREVRANGE` retorna os bairros com maior volume de buscas em O(log N + M) — a consulta mais natural para o problema de demanda regionalizada.
+
+```
+ranking:bairros:buscas →
+    Pinheiros         312
+    Vila Madalena     289
+    Itaim Bibi        241
+    ...
+```
+
+---
+
+### `Hash variacao:preco:{posto_id}:{combustivel}` — delta de preço
+
+**Por que Hash dedicado?** A variação de preço é uma métrica composta (preço atual, anterior, delta absoluto, delta percentual, timestamp, fonte) que precisa ser lida inteira para a tela de "postos com maior oscilação". Um Hash dedicado por posto+combustível permite `HGETALL` O(N) e `SCAN variacao:preco:*` para varrer todos os pares.
+
+```
+variacao:preco:001:gasolina_comum → {
+    preco_atual: 5.99,
+    preco_anterior: 5.79,
+    delta_abs: 0.20,
+    delta_pct: 3.45,
+    ts: 1710010203000,
+    fonte: "app_posto"
+}
+```
+
+---
+
+### `Geo geo:postos:{cidade}` — consulta por proximidade
+
+**Por que Geo?** O Redis Geo usa internamente um Sorted Set com Geohash codificado no score, permitindo `GEORADIUS` em O(N+log M) onde N é o número de resultados. Alternativas como filtrar coordenadas em memória teriam custo O(total de postos). A chave é particionada por cidade para evitar scans globais em deployments maiores.
+
+```bash
+GEORADIUS geo:postos:são_paulo -46.6830 -23.5634 5 km ASC COUNT 10
+# → posto_007 (1.2 km), posto_012 (2.8 km), posto_003 (3.1 km) ...
+```
+
+---
+
+### `TimeSeries ts:posto:{id}:preco:{combustivel}` — evolução temporal
+
+**Por que TimeSeries?** O módulo RedisTimeSeries armazena dados de série temporal comprimidos (chunk-based) e suporta `TS.RANGE` com agregações nativas (`avg`, `min`, `max`, `sum`) por janela de tempo — sem precisar carregar todos os pontos em memória. O valor armazenado é o preço em R$/L, não uma contagem. Retenção configurada para 7 dias.
+
+```bash
+TS.RANGE ts:posto:001:preco:gasolina_comum - + AGGREGATION avg 3600000
+# Retorna: [(ts_hora_1, 5.79), (ts_hora_2, 5.85), (ts_hora_3, 5.99) ...]
+```
+
+---
+
+### `Sorted Set ranking:postos:avaliacoes` — ranking de avaliação
+
+O score é a média ponderada calculada em tempo real a cada evento `rating`: `(rating_sum / rating_count)`. O Hash do posto mantém `rating_sum` e `rating_count` acumulados para recalcular a média sem precisar de histórico.
+
+---
+## Implementação técnica
 
 * **MongoDB**
 
@@ -142,13 +299,13 @@ Além do seed inicial, a solução inclui um **gerador contínuo de eventos**, p
 ### Execução
 
 ```bash
-python pipeline/realtime_event_generator.py --interval 120
+python realtime_queries/realtime_event_generator.py --interval 120
 ```
 
 Para testes rápidos:
 
 ```bash
-python pipeline/realtime_event_generator.py --interval 10
+python realtime_queries/realtime_event_generator.py --interval 10
 ```
 
 ### Fluxo completo
@@ -161,11 +318,11 @@ Essa abordagem permite observar o sistema operando continuamente, como em um cen
 
 ---
 
-## 📊 Dashboards
+## Dashboards
 
 A solução possui duas camadas de visualização:
 
-### 🧩 Dashboard analítico
+### 🧩 Dashboard analítico (Estático)
 
 ```bash
 streamlit run queries/data-view.py
@@ -201,36 +358,6 @@ Exemplo de evento exibido:
 price_update · posto_012 · Pinheiros
 gasolina_comum | R$ 5.79 → R$ 5.99 | Δ 3.45%
 ```
-
----
-
-## 🗄️ Modelo de dados
-
-### MongoDB
-
-#### Collection `postos`
-
-Cadastro desnormalizado dos postos.
-
-#### Collection `events`
-
-Armazena todos os eventos da plataforma (event-driven).
-
----
-
-## ⚡ Estruturas Redis
-
-| Estrutura                          | Uso                   |
-| ---------------------------------- | --------------------- |
-| `Hash posto:{id}`                  | Estado atual do posto |
-| `SortedSet ranking:postos:preco:*` | Ranking de preços     |
-| `SortedSet ranking:bairros:buscas` | Demanda regional      |
-| `SortedSet ranking:postos:views`   | Popularidade          |
-| `Hash variacao:preco:*`            | Delta de preço        |
-| `Geo geo:postos:*`                 | Proximidade           |
-| `TimeSeries ts:posto:*`            | Evolução temporal     |
-
----
 
 ## 🚀 Execução do projeto
 
@@ -314,24 +441,10 @@ TS.RANGE ts:posto:001:preco:gasolina_comum - +
 
 https://github.com/tigressdev/radar_app
 
-> Caso privado, compartilhar com: https://github.com/commithouse
-
----
-
-## 🧑‍💻 Integrantes
-
-* André da Silva Gomes Lima
-* Evandro dos Santos Sales
-* Felipe de Almeida Pereira
-* Helen Fernandes Borges
-* Matheus Pereira Condotta
-* Roberto Ferreira Paulo
-
 ---
 
 ## 🏁 Conclusão
 
 O projeto demonstra, de forma prática, como construir uma arquitetura moderna de dados baseada em eventos, com foco em performance, escalabilidade e capacidade analítica em tempo quase real.
-
 A solução implementa padrões amplamente utilizados em sistemas de produção, aproximando o ambiente acadêmico de cenários reais de engenharia de dados.
 
