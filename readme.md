@@ -372,7 +372,7 @@ docker-compose up -d
 ### 2. Popular MongoDB
 
 ```bash
-python init/mongo_seed.py --reset
+python init/mongo_seed_main.py --reset
 ```
 
 ---
