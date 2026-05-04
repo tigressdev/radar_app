@@ -361,49 +361,108 @@ gasolina_comum | R$ 5.79 → R$ 5.99 | Δ 3.45%
 
 ## 🚀 Execução do projeto
 
-### 1. Subir infraestrutura
+> **Pré-requisito:** Docker instalado e rodando na máquina.
+
+---
+
+### Passo 1 — Subir a infraestrutura
+
+Sobe o MongoDB Replica Set e o Redis Stack via Docker Compose:
 
 ```bash
-docker-compose up -d
+docker compose up -d
+```
+
+Aguarde ~10 segundos para o MongoDB inicializar o Replica Set antes de prosseguir.
+
+---
+
+### Passo 2 — Configurar o ambiente virtual e instalar dependências
+
+```bash
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+> **Linux/macOS:** usar `source .venv/bin/activate` no lugar de `.\.venv\Scripts\activate`
+
+---
+
+### Passo 3 — Resetar e popular o MongoDB com dados fake
+
+Limpa o banco e popula com 30 postos e 5.000 eventos:
+
+```bash
+python init/mongo_seed.py --reset
 ```
 
 ---
 
-### 2. Popular MongoDB
+### Passo 4 — Rodar o Event Transformer
 
-```bash
-python mongo_seed_main.py --reset
-```
-
----
-
-### 3. Rodar pipeline
-
-```bash
-python pipeline/mongodb_consumer.py --flush-redis
-```
-
----
-### 4. Event Transformer - adaptar eventos para as estruturas de dados implantadas
+Garante que as estruturas de normalização e mapeamento de chaves Redis estão prontas:
 
 ```bash
 python pipeline/event_transformer.py
 ```
 
 ---
-### (Opcional) Ativar realtime
+
+### Passo 5 — Iniciar o Consumer (escuta de eventos em tempo real)
+
+Conecta ao MongoDB via Change Stream, faz backfill dos eventos existentes e fica **escutando novos eventos continuamente**. Manter este terminal aberto:
 
 ```bash
-python realtime_queries/realtime_event_generator.py
+python pipeline/mongodb_consumer.py --flush-redis
 ```
+
+O consumer ficará ativo aguardando novos eventos — será alimentado pelo gerador no passo seguinte.
 
 ---
 
-### 5. Rodar dashboards
+### Passo 6 — Ativar o gerador de eventos em tempo real
+
+Gera eventos aleatórios continuamente no MongoDB (`view`, `search`, `price_update`, `rating`, `abastecimento`), que são capturados pelo consumer via Change Stream e propagados para o Redis:
+
+```bash
+python realtime_queries/realtime_event_generator.py --interval 20
+```
+
+> `--interval 20` = novo evento a cada 20 segundos, ideal para ver o dashboard atualizando ao vivo. Reduza para `--interval 5` para testes mais rápidos.
+
+---
+
+### Passo 7 — Iniciar o Redis Reader
+
+Lê as estruturas do Redis em tempo real e alimenta o dashboard com os dados processados pelo consumer:
+
+```bash
+python realtime_queries/redis_reader.py
+```
+
+Manter este terminal aberto junto com o consumer (Passo 5).
+
+---
+
+### Passo 8 — Rodar o dashboard em tempo real
+
+Abre o dashboard principal com auto-refresh, rankings atualizados ao vivo e feed dos últimos eventos:
+
+```bash
+streamlit run realtime_queries/data-view-realtime.py
+```
+
+O Streamlit abrirá automaticamente no navegador (geralmente `http://localhost:8501`) e solicitará permissão. Os logs e rankings serão atualizados em tempo quase real conforme o gerador envia eventos.
+
+---
+
+### (Opcional) Dashboard analítico estático
+
+Versão consolidada para análise histórica — não depende do gerador estar rodando:
 
 ```bash
 streamlit run queries/data-view.py
-streamlit run realtime_queries/data-view-realtime.py
 ```
 
 ---
@@ -453,4 +512,3 @@ https://github.com/tigressdev/radar_app
 
 O projeto demonstra, de forma prática, como construir uma arquitetura moderna de dados baseada em eventos, com foco em performance, escalabilidade e capacidade analítica em tempo quase real.
 A solução implementa padrões amplamente utilizados em sistemas de produção, aproximando o ambiente acadêmico de cenários reais de engenharia de dados.
-

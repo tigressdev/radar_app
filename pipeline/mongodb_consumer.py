@@ -29,7 +29,7 @@ load_dotenv(".env.local")
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/?directConnection=true")
-MONGO_DB = os.getenv("MONGO_DB", "radar_combustivel")
+MONGO_DB = os.getenv("RADAR_MONGO_DB", "radar_combustivel")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "events")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
