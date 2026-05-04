@@ -1,361 +1,337 @@
-# Lab encontro2: Pipeline Streaming MongoDB → Redis
-## Caso de Uso: Marketplace de Restaurantes (iFood-like)
+# ⛽ Radar Combustível — Pipeline MongoDB → Redis
 
-> **Encontro 2 — Bancos de Dados In-Memory | FIAP MBA em Tecnologia**
-> Prof. Daniel Lemeszenski · Março de 2026
-
----
-
-## 🎯 Objetivo
-
-Construir um pipeline de streaming em tempo real que captura eventos de um marketplace de restaurantes (buscas, cliques, pedidos) do MongoDB e os propaga para o Redis, mantendo métricas atualizadas de:
-
-- **Restaurantes mais visitados** (ranking em tempo real)
-- **Pratos mais buscados** (full-text search + contador)
-- **Métricas por restaurante** (views, pedidos, nota média)
-- **Top bairros** (geo + agregação)
+> **MBA FIAP — Bancos de Dados In-Memory | Trabalho Final em Grupo**
+> Arquitetura de dados em tempo quase real baseada em eventos, com MongoDB como event store, Redis como camada de serving e Streamlit para visualização interativa.
 
 ---
 
-## 🏗️ Arquitetura
+## 🧑‍💻 Integrantes
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    EVENTO DE ORIGEM                     │
-│  App Mobile/Web → MongoDB (eventos brutos)              │
-└──────────────────────────┬──────────────────────────────┘
-                           │ Change Stream (oplog)
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│              PIPELINE PYTHON (Consumer)                 │
-│  mongodb_consumer.py                                    │
-│  - Lê Change Stream do MongoDB                          │
-│  - Transforma evento                                    │
-│  - Publica no Redis                                     │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-   │ Sorted Sets │  │ RediSearch  │  │ TimeSeries  │
-   │ (Rankings)  │  │ (Busca)     │  │ (Métricas)  │
-   └─────────────┘  └─────────────┘  └─────────────┘
-          │                │                │
-          └────────────────┼────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│                   SERVING LAYER                         │
-│  redis_reader.py — Consultas <10ms                      │
-└─────────────────────────────────────────────────────────┘
-```
+| Nome | RM |
+|------|----|
+| André da Silva Gomes Lima | RM 364124 |
+| Evandro dos Santos Sales  | RM 362411 |
+| Felipe de Almeida Pereira | RM 361006 |
+| Helen Fernandes Borges    | RM 364154 |
+| Matheus Pereira Condotta  | RM 361638 |
+| Roberto Ferreira Paulo    | RM 362593 |
 
-📘 Detalhamento do pipeline de streaming: [docs/streaming-mongo-redis.md](docs/streaming-mongo-redis.md)
+---
+## 🎯 Visão geral
+
+O **Radar Combustível** é uma plataforma orientada a dados que monitora, em tempo quase real, o comportamento de preços, demanda e interação de usuários em postos de combustível na Grande São Paulo.
+
+A solução foi projetada para responder perguntas críticas de negócio com baixa latência:
+
+* Onde estão os **menores preços** por combustível?
+* Quais regiões apresentam **maior demanda**?
+* Quais postos tiveram **maior variação de preço**?
+* Quais opções estão **mais próximas do usuário**?
+* Como os preços evoluem **ao longo do tempo**?
 
 ---
 
-## 📦 Estrutura do Repositório
+## 🧠 Proposta da solução
+
+A arquitetura implementa um pipeline moderno orientado a eventos:
+
+```text
+mongo_seed + realtime_generator
+            ↓
+        MongoDB (events)
+            ↓
+     Change Stream (real-time)
+            ↓
+        Consumer (Python)
+            ↓
+          Redis (serving layer)
+            ↓
+     Streamlit (analytics + realtime)
+```
+
+O sistema permite tanto análise histórica quanto monitoramento contínuo, simulando um ambiente próximo de produção.
+
+---
+---
+
+## 🏗️ Arquitetura da solução
 
 ```
-lab-encontro2/
-├── docker-compose.yml          # MongoDB + Redis + App
-├── requirements.txt            # Dependências Python
-├── .env                        # Variáveis de ambiente (local)
-├── .env.example                # Variáveis de ambiente (template)
-├── .gitignore                  # Arquivos ignorados pelo Git
-├── docs/
-│   └── streaming-mongo-redis.md # Explicação do fluxo de streaming
-├── init/
-│   ├── mongo_seed.py           # Popula MongoDB com dados fake
-│   └── redis_indexes.py        # Cria índices RediSearch
-├── pipeline/
-│   ├── mongodb_consumer.py      # Lê Change Stream e publica no Redis
-│   └── event_transformer.py     # Transforma eventos brutos
-├── queries/
-│   ├── data-view.py            # Dashboard Streamlit em tempo real
-│   └── redis_reader.py         # Consultas de demonstração
-└── readme.md
+┌─────────────────────────────────────────────────────────────────────┐
+│                         RADAR COMBUSTÍVEL                           │
+│                                                                     │
+│  ┌──────────────┐    Change      ┌─────────────────────────────┐    │
+│  │   MongoDB    │────Stream────▶│   mongodb_consumer.py       │    │
+│  │              │                │   (pipeline principal)      │    │
+│  │  • postos    │                └────────────┬────────────────┘    │
+│  │  • eventos   │                             │                     │
+│  │    - view    │                    normalize_event()              │
+│  │    - search  │                    event_transformer.py           │
+│  │    - price_  │                             │                     │
+│  │      update  │           ┌─────────────────▼───────────────────┐ │
+│  │    - rating  │           │              REDIS                  │ │
+│  │    - abaste- │           │                                     │ │
+│  │      cimento │           │  Hash    posto:{id}                 │ │
+│  └──────────────┘           │  SortedSet ranking:postos:preco:*   │ │
+│                             │  SortedSet ranking:bairros:buscas   │ │
+│  ┌──────────────┐           │  SortedSet ranking:postos:views     │ │
+│  │ mongo_seed   │           │  SortedSet ranking:postos:avaliacoes│ │
+│  │    .py       │           │  Hash    variacao:preco:{id}:{comb} │ │
+│  │              │           │  Geo     geo:postos:{cidade}        │ │
+│  │ (seed fake)  │           │  TimeSeries ts:posto:{id}:preco:*   │ │
+│  └──────────────┘           │  TimeSeries ts:posto:{id}:views     │ │
+│                             └──────────────┬──────────────────────┘ │
+│                                            │                        │
+│                             ┌──────────────▼──────────────────────┐ │
+│                             │   Streamlit Dashboard               | |
+|                             |    (Real-Time Analytics)            │ │
+│                             │  • Visão executiva                  │ │
+│                             │  • Preço & variação                 │ │
+│                             │  • Demanda & rankings               │ │
+│                             │  • Mapa GEO                         │ │
+│                             │  • TimeSeries                       │ │
+│                             │  • Debug Redis                      │ │
+│                             └─────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
 ```
+## 🏗️ Arquitetura técnica
+
+* **MongoDB**
+
+  * Armazena eventos operacionais (`events`)
+  * Replica Set habilitado para Change Streams
+
+* **Consumer (Python)**
+
+  * Processa eventos em tempo real
+  * Executa transformações e normalizações
+  * Atualiza estruturas Redis otimizadas
+
+* **Redis**
+
+  * Camada de serving de alta performance
+  * Estruturas utilizadas:
+
+    * Sorted Sets → rankings
+    * Hashes → estado dos postos
+    * GEO → localização
+    * TimeSeries → evolução temporal
+
+* **Streamlit**
+
+  * Dashboard analítico e operacional
+  * Atualização automática (auto-refresh)
 
 ---
 
-## 🗃️ Modelo de Dados
+## ⚡ Pipeline em tempo real
 
-### MongoDB — Coleção `events`
-```json
-{
-  "_id": "ObjectId",
-  "type": "view | search | order | rating",
-  "ts": 1710010203000,
-  "user_id": "usr_291",
-  "restaurant_id": "resto_245",
-  "restaurant_name": "Sushi Pinheiros",
-  "dish_name": "Temaki Salmão",
-  "dish_id": "dish_88",
-  "neighborhood": "Pinheiros",
-  "lat": -23.5505,
-  "lon": -46.6333,
-  "stars": 4.8
-}
-```
+Além do seed inicial, a solução inclui um **gerador contínuo de eventos**, permitindo simular atividade real da plataforma.
 
-### Redis — Estruturas de Destino
+### 🔁 Gerador de eventos (`realtime_event_generator.py`)
 
-| Chave | Tipo | Descrição |
-|-------|------|-----------|
-| `ranking:restaurants:views` | Sorted Set | Score = total de views |
-| `ranking:restaurants:orders` | Sorted Set | Score = total de pedidos |
-| `ranking:dishes:searches` | Sorted Set | Score = total de buscas |
-| `resto:{id}` | Hash | Metadados do restaurante |
-| `idx:restaurants` | RediSearch Index | Busca full-text + geo |
-| `ts:resto:{id}:views` | TimeSeries | Views por minuto |
-| `ts:resto:{id}:orders` | TimeSeries | Pedidos por minuto |
+* Gera eventos aleatórios continuamente
+* Tipos simulados:
 
----
+  * `view`
+  * `search`
+  * `price_update`
+  * `rating`
+  * `abastecimento`
 
-## 🔧 Configuração do Ambiente
-
-### Passo 1: Pré-requisitos
-- Docker + Docker Compose
-- Python 3.10+
-
-#### Instalação Opcional 
-- [mongo comapps](https://www.mongodb.com/try/download/compass) ide para editar dados no mongo
-- [redis insight](https://redis.io/insight/) ide para editar dados no redis
-
-### Passo 2: Variáveis de Ambiente
-
-Copie o arquivo de exemplo:
+### Execução
 
 ```bash
-cp .env.example .env
+python pipeline/realtime_event_generator.py --interval 120
 ```
 
-```env
-MONGO_URI=mongodb://localhost:27017/?directConnection=true
-MONGO_DB=marketplace
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
+Para testes rápidos:
+
+```bash
+python pipeline/realtime_event_generator.py --interval 10
 ```
 
-### Passo 3: Subir o ambiente
+### Fluxo completo
+
+```text
+generator → MongoDB → Change Stream → Consumer → Redis → Dashboard
+```
+
+Essa abordagem permite observar o sistema operando continuamente, como em um cenário real.
+
+---
+
+## 📊 Dashboards
+
+A solução possui duas camadas de visualização:
+
+### 🧩 Dashboard analítico
+
+```bash
+streamlit run queries/data-view.py
+```
+
+Focado em análise consolidada:
+
+* Rankings de preços
+* Variação de preços
+* Demanda por bairro
+* GEO (mapa)
+* Séries temporais
+* Debug Redis
+
+---
+
+### ⚡ Dashboard realtime
+
+```bash
+streamlit run realtime_queries/data-view-realtime.py
+```
+
+Focado em monitoramento ao vivo:
+
+* 🔥 Top 5 eventos mais recentes (MongoDB)
+* 📈 Rankings atualizando em tempo real
+* 🔄 Auto-refresh configurável
+* 📊 Integração completa com Redis
+
+Exemplo de evento exibido:
+
+```
+price_update · posto_012 · Pinheiros
+gasolina_comum | R$ 5.79 → R$ 5.99 | Δ 3.45%
+```
+
+---
+
+## 🗄️ Modelo de dados
+
+### MongoDB
+
+#### Collection `postos`
+
+Cadastro desnormalizado dos postos.
+
+#### Collection `events`
+
+Armazena todos os eventos da plataforma (event-driven).
+
+---
+
+## ⚡ Estruturas Redis
+
+| Estrutura                          | Uso                   |
+| ---------------------------------- | --------------------- |
+| `Hash posto:{id}`                  | Estado atual do posto |
+| `SortedSet ranking:postos:preco:*` | Ranking de preços     |
+| `SortedSet ranking:bairros:buscas` | Demanda regional      |
+| `SortedSet ranking:postos:views`   | Popularidade          |
+| `Hash variacao:preco:*`            | Delta de preço        |
+| `Geo geo:postos:*`                 | Proximidade           |
+| `TimeSeries ts:posto:*`            | Evolução temporal     |
+
+---
+
+## 🚀 Execução do projeto
+
+### 1. Subir infraestrutura
+
 ```bash
 docker-compose up -d
 ```
 
-### Passo 4: Instalar dependências
+---
+
+### 2. Popular MongoDB
+
 ```bash
-pip install -r requirements.txt
-```
-
-### Passo 5: Inicializar dados e índices
-
-# 1. Popula MongoDB com 500 restaurantes e 10K eventos fake
-```bash
-python init/mongo_seed.py
-```
-## Validar coleção mongo db
-
->conection url:
-```bash
-mongodb://localhost:27017/?directConnection=true
-```
-![alt text](image.png)
-
-### colecao eventos 
-![alt text](image-1.png)
-
-# 2. Cria índices no Redis (RediSearch + TimeSeries)
-```bash
-python init/redis_indexes.py
+python init/mongo_seed.py --reset
 ```
 
 ---
 
-## 🚀 Executando o Pipeline
-
-### Passo 6: Terminal 1 — Consumidor (Change Stream)
-```bash
-python pipeline/mongodb_consumer.py
-```
-
-Saída esperada:
-```
-[CONSUMER] Conectado ao MongoDB Change Stream
-[CONSUMER] Aguardando eventos...
-[EVENT] view | resto_245 | Sushi Pinheiros | Pinheiros
-[REDIS] ZINCRBY ranking:restaurants:views 1 resto_245 → score: 142
-[REDIS] TS.ADD ts:resto:245:views * 1
-[EVENT] search | dish: temaki salmão
-[REDIS] ZINCRBY ranking:dishes:searches 1 dish_88 → score: 37
-```
-
-### Passo 7: Terminal 2 — Consultas em tempo real
-```bash
-python queries/redis_reader.py
-```
-
----
-
-### Passo 8: Terminal 3 — Dashboard Streamlit (Data View)
-```bash
-python -m streamlit run queries/data-view.py
-
-```
-
-Abra no navegador:
-```text
-http://localhost:8501
-```
-
-![alt text](image-2.png)
-
-Você deve visualizar:
-- Top 10 restaurantes por views
-- Top 5 pratos por buscas
-- Resultado RediSearch (pizza em Pinheiros)
-- Série temporal por restaurante (`ts:resto:{id}:views`)
-
----
-
-## 📊 Queries de Demonstração
-
-### Top 10 restaurantes mais visitados
-```python
-# redis_reader.py
-top = redis.zrevrange("ranking:restaurants:views", 0, 9, withscores=True)
-```
-
-### Top 5 pratos mais buscados
-```python
-top_dishes = redis.zrevrange("ranking:dishes:searches", 0, 4, withscores=True)
-```
-
-### Restaurantes de pizza em Pinheiros com 4.5+ estrelas
-```python
-results = redis.ft("idx:restaurants").search(
-    Query("@cuisine:{pizza} @neighborhood:{Pinheiros}")
-    .add_filter(NumericFilter("stars", 4.5, 5))
-    .sort_by("views", asc=False)
-    .paging(0, 10)
-)
-```
-
-### Série temporal de views do restaurante 245 (últimos 10 min)
-```python
-series = redis.ts().range(
-    "ts:resto:245:views",
-    from_time="-",
-    to_time="+",
-    aggregation_type="sum",
-    bucket_size_msec=60000  # agrega por minuto
-)
-```
-
-### Rodando direto no redis-cli
-```bash
-# Abrir redis-cli no container
-docker exec -it lab-redis redis-cli
-
-# Top 10 restaurantes mais visitados
-ZREVRANGE ranking:restaurants:views 0 9 WITHSCORES
-
-# Top 5 pratos mais buscados
-ZREVRANGE ranking:dishes:searches 0 4 WITHSCORES
-
-# Restaurantes de pizza em Pinheiros com estrelas >= 4.5
-FT.SEARCH idx:restaurants "@cuisine:{pizza} @neighborhood:{Pinheiros} @stars:[4.5 5]" SORTBY views DESC LIMIT 0 10
-
-# Série temporal de views por minuto do restaurante 245
-TS.RANGE ts:resto:245:views - + AGGREGATION sum 60000
-```
-
----
-
-## 🧪 Passo 9: Simulando Carga (Stress Test)
+### 3. Rodar pipeline
 
 ```bash
-# Gera 1000 eventos aleatórios no MongoDB
-python init/mongo_seed.py --stress --events 1000
-
-# (Opcional) execute novamente para aumentar volume
-python init/mongo_seed.py --stress --events 2000
+python pipeline/mongodb_consumer.py --flush-redis
 ```
 
-Validação em tempo real:
+---
 
-1. **Terminal 1 (consumer)** deve mostrar novos eventos sendo processados.
-2. **Terminal 2 (reader)** deve exibir aumento de scores nos rankings.
-3. **Dashboard Streamlit** deve refletir atualização de gráficos/tabelas após refresh.
-
-Validação rápida no Redis:
+### 4. (Opcional) Ativar realtime
 
 ```bash
-docker exec -it lab-redis redis-cli
-```
-
-```redis
-ZREVRANGE ranking:restaurants:views 0 9 WITHSCORES
-ZREVRANGE ranking:dishes:searches 0 4 WITHSCORES
-TS.RANGE ts:resto:245:views - + AGGREGATION sum 60000
+python pipeline/realtime_event_generator.py
 ```
 
 ---
 
-## 📋 Checklist de Validação
-
-Ao terminar o lab, verifique:
-
-- [ ] `docker-compose up -d` sobe sem erros (MongoDB + Redis)
-- [ ] `mongo_seed.py` popula ≥ 500 restaurantes e ≥ 10K eventos
-- [ ] `redis_indexes.py` cria `idx:restaurants` sem erro
-- [ ] `mongodb_consumer.py` processa eventos sem travar
-- [ ] `ZREVRANGE ranking:restaurants:views 0 9` retorna 10 resultados
-- [ ] Busca `@cuisine:{pizza}` retorna resultados em <10ms
-- [ ] TimeSeries retorna série por minuto para qualquer restaurante
-
----
-
-## 💡 Decisões de Arquitetura (para discussão)
-
-| Decisão | Escolha | Justificativa |
-|---------|---------|---------------|
-| Fonte de eventos | MongoDB Change Stream | Captura inserções sem polling |
-| Rankings | Sorted Set | ZINCRBY atômico, ZREVRANGE O(log N) |
-| Busca de pratos | RediSearch | Full-text + filtro simultâneo |
-| Métricas temporais | RedisTimeSeries | Agregação nativa por janela |
-| Consistência | Eventual | Aceitável para ranking/métricas |
-| Frequência batch | A cada 1h | Recalcula top bairros e tendências |
-
----
-
-## 📚 Conceitos Praticados
-
-- MongoDB Change Stream — captura eventos do oplog sem polling
-- Sorted Set (ZINCRBY) — ranking atômico e ordenado em O(log N)
-- RediSearch — full-text search com filtros numéricos e geoespaciais
-- RedisTimeSeries — série temporal com agregação nativa por janela
-- Pipeline streaming vs batch — quando usar cada estratégia em produção
-- Consistência eventual — trade-off aceitável para métricas de ranking
-
----
-
-## 🔗 Referências
-
-- [MongoDB Change Streams Docs](https://www.mongodb.com/docs/manual/changeStreams/)
-- [Redis Sorted Sets](https://redis.io/docs/data-types/sorted-sets/)
-- [RediSearch Query Syntax](https://redis.io/docs/interact/search-and-query/)
-- [RedisTimeSeries](https://redis.io/docs/data-types/timeseries/)
-- Repositório do lab Vector DB: `commithouse/lab-vector-db-redis`
-
----
-
-## 🧹 Comandos para Limpar o Ambiente
+### 5. Rodar dashboards
 
 ```bash
-# Encerrar containers e remover volumes do lab
-docker-compose down -v
-
-# (Opcional) remover imagens baixadas no lab
-docker-compose down --rmi local
+streamlit run queries/data-view.py
+streamlit run realtime_queries/data-view-realtime.py
 ```
+
+---
+
+## 🧪 Validação
+
+Exemplos de queries Redis:
+
+```bash
+ZREVRANGE ranking:postos:views 0 10 WITHSCORES
+ZRANGE ranking:postos:preco:gasolina_comum 0 10 WITHSCORES
+ZREVRANGE ranking:bairros:buscas 0 10 WITHSCORES
+GEORADIUS geo:postos:sao_paulo -46.68 -23.56 5 km
+TS.RANGE ts:posto:001:preco:gasolina_comum - +
+```
+
+---
+
+## 📈 Insights obtidos
+
+* Postos mais acessados não necessariamente são os mais baratos
+* Bairros com maior volume de busca indicam concentração de demanda
+* Variações de preço mostram volatilidade por combustível
+* GEO permite recomendação baseada em proximidade
+* Séries temporais evidenciam tendências e sazonalidade
+
+---
+
+## 🚀 Diferenciais da solução
+
+* Arquitetura **event-driven com Change Stream**
+* Simulação de ambiente real com dados contínuos
+* Uso avançado de Redis como camada de serving
+* Separação clara entre ingestão, transformação e consumo
+* Dashboard com atualização em tempo quase real
+* Estruturas otimizadas para baixa latência
+
+---
+
+## 🔗 Repositório
+
+https://github.com/tigressdev/radar_app
+
+> Caso privado, compartilhar com: https://github.com/commithouse
+
+---
+
+## 🧑‍💻 Integrantes
+
+* André da Silva Gomes Lima
+* Evandro dos Santos Sales
+* Felipe de Almeida Pereira
+* Helen Fernandes Borges
+* Matheus Pereira Condotta
+* Roberto Ferreira Paulo
+
+---
+
+## 🏁 Conclusão
+
+O projeto demonstra, de forma prática, como construir uma arquitetura moderna de dados baseada em eventos, com foco em performance, escalabilidade e capacidade analítica em tempo quase real.
+
+A solução implementa padrões amplamente utilizados em sistemas de produção, aproximando o ambiente acadêmico de cenários reais de engenharia de dados.
+
