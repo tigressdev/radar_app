@@ -372,7 +372,7 @@ docker-compose up -d
 ### 2. Popular MongoDB
 
 ```bash
-python init/mongo_seed_main.py --reset
+python mongo_seed_main.py --reset
 ```
 
 ---
@@ -388,7 +388,7 @@ python pipeline/mongodb_consumer.py --flush-redis
 ### 4. (Opcional) Ativar realtime
 
 ```bash
-python pipeline/realtime_event_generator.py
+python realtime_queries/realtime_event_generator.py
 ```
 
 ---
