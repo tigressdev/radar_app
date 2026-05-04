@@ -384,8 +384,14 @@ python pipeline/mongodb_consumer.py --flush-redis
 ```
 
 ---
+### 4. Event Transformer - adaptar eventos para as estruturas de dados implantadas
 
-### 4. (Opcional) Ativar realtime
+```bash
+python pipeline/event_transformer.py
+```
+
+---
+### (Opcional) Ativar realtime
 
 ```bash
 python realtime_queries/realtime_event_generator.py
